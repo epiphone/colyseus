@@ -65,7 +65,7 @@ export async function joinOrCreate(roomName: string, clientOptions: ClientOption
     }
 
     return await reserveSeatFor(room, clientOptions);
-  }, 5, [SeatReservationError]);
+  }, 5);
 }
 
 /**
@@ -351,6 +351,8 @@ export function gracefullyShutdown(): Promise<any> {
 
 /**
  * Reserve a seat for a client in a room
+ *
+ * @throws `SeatReservationError` if room is full.
  */
 export async function reserveSeatFor(room: RoomListingData, options: any) {
   const sessionId: string = generateId();
@@ -363,11 +365,17 @@ export async function reserveSeatFor(room: RoomListingData, options: any) {
   let successfulSeatReservation: boolean;
 
   try {
-    successfulSeatReservation = await remoteRoomCall(room.roomId, '_reserveSeat', [sessionId, options]);
-
+    successfulSeatReservation = await retry(
+      () => remoteRoomCall(room.roomId, "_reserveSeat", [sessionId, options]),
+      2,
+    );
   } catch (e) {
     debugMatchMaking(e);
-    successfulSeatReservation = false;
+
+    debugMatchMaking(`cleaning up stale room '${room.name}', roomId: ${room.roomId}`);
+    await room.remove();
+
+    throw e;
   }
 
   if (!successfulSeatReservation) {

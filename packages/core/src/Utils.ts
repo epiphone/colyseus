@@ -41,7 +41,7 @@ export function retry<T = any>(
       .then(resolve)
       .catch((e) => {
         if (
-          errorWhiteList.indexOf(e.constructor) !== -1 &&
+          (errorWhiteList.length === 0 || errorWhiteList.includes(e.constructor)) &&
           retries++ < maxRetries
         ) {
           setTimeout(() => {
