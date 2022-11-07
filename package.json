@@ -5,6 +5,7 @@
   "workspaces": [
     "bundles/*",
     "packages/*",
+    "!packages/core",
     "packages/drivers/*",
     "packages/transport/*",
     "packages/presence/*",
