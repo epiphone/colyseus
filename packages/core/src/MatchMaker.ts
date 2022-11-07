@@ -54,7 +54,8 @@ export function setup(_presence?: Presence, _driver?: MatchMakerDriver, _process
   presence.hset(getRoomCountKey(), processId, '0');
 }
 
-const joinOrCreateQueue = new PQueue({ concurrency: 1 });
+const joinOrCreateConcurrency = Number(process.env.COLYSEUS_JOIN_OR_CREATE_CONCURRENCY || 20);
+const joinOrCreateQueue = new PQueue({ concurrency: joinOrCreateConcurrency });
 
 /**
  * Join or create into a room and return seat reservation
@@ -64,6 +65,10 @@ export async function joinOrCreate(
   clientOptions: ClientOptions = {}
 ): Promise<SeatReservation> {
   const findAndReserveSeat = async (): Promise<SeatReservation> => {
+    if (isGracefullyShuttingDown) {
+      throw Error("Server shutting down");
+    }
+
     let room = await findOneRoomAvailable(roomName, clientOptions);
 
     if (!room) {
@@ -154,18 +159,28 @@ export async function findOneRoomAvailable(roomName: string, clientOptions: Clie
     throw new ServerError( ErrorCode.MATCHMAKE_NO_HANDLER, `provided room name "${roomName}" not defined`);
   }
 
-  const roomQuery = driver.findOne({
+  const roomQuery = driver.find({
     locked: false,
     name: roomName,
     private: false,
     ...handler.getFilterOptions(clientOptions),
   });
 
-  if (handler.sortOptions) {
-    roomQuery.sort(handler.sortOptions);
+  // TODO handle sortOptions
+
+  const availableRooms = (await roomQuery).filter(room => !roomIsFull(room))
+
+  if (availableRooms.length === 0) {
+    return undefined;
   }
 
-  return await roomQuery;
+  return availableRooms[Math.floor(availableRooms.length * Math.random())]
+}
+
+function roomIsFull(room: RoomListingData): boolean {
+  const reservationsInProgress = inProgressSeatReservationsCount[room.roomId] || 0;
+
+  return room.clients + reservationsInProgress >=  room.maxClients
 }
 
 /**
@@ -359,6 +374,8 @@ export function gracefullyShutdown(): Promise<any> {
   return Promise.all(disconnectAll());
 }
 
+const inProgressSeatReservationsCount: { [roomId: string]: number } = {};
+
 /**
  * Reserve a seat for a client in a room
  *
@@ -372,6 +389,8 @@ export async function reserveSeatFor(room: RoomListingData, options: any): Promi
     sessionId, room.roomId, processId,
   );
 
+  inProgressSeatReservationsCount[room.roomId] =
+    (inProgressSeatReservationsCount[room.roomId] || 0) + 1;
   let successfulSeatReservation: boolean;
 
   try {
@@ -386,6 +405,11 @@ export async function reserveSeatFor(room: RoomListingData, options: any): Promi
     await room.remove();
 
     throw e;
+  } finally {
+    inProgressSeatReservationsCount[room.roomId] = Math.max(
+      inProgressSeatReservationsCount[room.roomId] - 1,
+      0
+    );
   }
 
   if (!successfulSeatReservation) {
