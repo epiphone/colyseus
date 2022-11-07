@@ -1,3 +1,4 @@
+import PQueue from 'p-queue'
 import { ErrorCode } from './Protocol';
 
 import { requestFromIPC, subscribeIPC } from './IPC';
@@ -53,11 +54,16 @@ export function setup(_presence?: Presence, _driver?: MatchMakerDriver, _process
   presence.hset(getRoomCountKey(), processId, '0');
 }
 
+const joinOrCreateQueue = new PQueue({ concurrency: 1 });
+
 /**
  * Join or create into a room and return seat reservation
  */
-export async function joinOrCreate(roomName: string, clientOptions: ClientOptions = {}) {
-  return await retry<Promise<SeatReservation>>(async () => {
+export async function joinOrCreate(
+  roomName: string,
+  clientOptions: ClientOptions = {}
+): Promise<SeatReservation> {
+  const findAndReserveSeat = async (): Promise<SeatReservation> => {
     let room = await findOneRoomAvailable(roomName, clientOptions);
 
     if (!room) {
@@ -65,7 +71,13 @@ export async function joinOrCreate(roomName: string, clientOptions: ClientOption
     }
 
     return await reserveSeatFor(room, clientOptions);
-  }, 5);
+  };
+
+  debugMatchMaking(
+    `Joining or creating room, queue size ${joinOrCreateQueue.size}`
+  );
+
+  return joinOrCreateQueue.add(() => retry(findAndReserveSeat, 3));
 }
 
 /**
@@ -137,25 +149,23 @@ export async function query(conditions: Partial<IRoomListingData> = {}) {
  * Find for a public and unlocked room available
  */
 export async function findOneRoomAvailable(roomName: string, clientOptions: ClientOptions): Promise<RoomListingData> {
-  return await awaitRoomAvailable(roomName, async () => {
-    const handler = handlers[roomName];
-    if (!handler) {
-      throw new ServerError( ErrorCode.MATCHMAKE_NO_HANDLER, `provided room name "${roomName}" not defined`);
-    }
+  const handler = handlers[roomName];
+  if (!handler) {
+    throw new ServerError( ErrorCode.MATCHMAKE_NO_HANDLER, `provided room name "${roomName}" not defined`);
+  }
 
-    const roomQuery = driver.findOne({
-      locked: false,
-      name: roomName,
-      private: false,
-      ...handler.getFilterOptions(clientOptions),
-    });
-
-    if (handler.sortOptions) {
-      roomQuery.sort(handler.sortOptions);
-    }
-
-    return await roomQuery;
+  const roomQuery = driver.findOne({
+    locked: false,
+    name: roomName,
+    private: false,
+    ...handler.getFilterOptions(clientOptions),
   });
+
+  if (handler.sortOptions) {
+    roomQuery.sort(handler.sortOptions);
+  }
+
+  return await roomQuery;
 }
 
 /**
@@ -354,7 +364,7 @@ export function gracefullyShutdown(): Promise<any> {
  *
  * @throws `SeatReservationError` if room is full.
  */
-export async function reserveSeatFor(room: RoomListingData, options: any) {
+export async function reserveSeatFor(room: RoomListingData, options: any): Promise<SeatReservation> {
   const sessionId: string = generateId();
 
   debugMatchMaking(
